@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import tempfile
 import time
@@ -23,6 +24,7 @@ from typing import Any
 
 import yaml
 from pydantic_evals import Case, Dataset
+from pydantic_evals.evaluators import EvaluatorContext
 
 from lab8.benchmark import prepare_from_memory, run_trial
 from lab8.console import utf8_stdio
@@ -90,19 +92,25 @@ def run_eval(shape: str, spec: dict[str, Any], seeds: list[int] | None = None) -
     dataset = Dataset(name=f"logix-{spec['eval_set_version']}", cases=cases,
                       evaluators=[GRADERS[m]() for m in metric_ids])
     with tempfile.TemporaryDirectory(prefix="lab9-eval-", ignore_cleanup_errors=True) as tmp:
-        # max_concurrency=1: shapes write traces/ and SQLite; keep runs deterministic.
-        report = dataset.evaluate_sync(make_task(shape, world, claims, labels, Path(tmp)),
-                                       max_concurrency=1, progress=False)
-    rows = []
-    for c in report.cases:
-        scores = {}
-        for m, g in zip(metric_ids, (GRADERS[m].__name__ for m in metric_ids)):
-            res = c.assertions.get(g)
-            scores[m] = None if res is None else bool(res.value)
-        rows.append({"item_id": c.metadata["item_id"], "seed": c.metadata["seed"],
-                     "slices": slices_of.get(c.metadata["item_id"], []), **scores,
-                     "cost": float(c.output["result"].get("cost_estimate") or 0.0)})
-    failures = [f"{c.name}:{f.name}:{f.error_message[:80]}" for c in report.cases for f in c.evaluator_failures]
+        task = make_task(shape, world, claims, labels, Path(tmp))
+        if os.getenv("LAB9_SYNC_FALLBACK") == "1":
+            # Some locked-down Windows sandboxes cannot create asyncio's internal socketpair.
+            # Keep this explicit fallback deterministic and use the same pydantic Evaluators.
+            rows, failures = _evaluate_sequential(cases, task, metric_ids, slices_of)
+        else:
+            # max_concurrency=1: shapes write traces/ and SQLite; keep runs deterministic.
+            report = dataset.evaluate_sync(task, max_concurrency=1, progress=False)
+            rows = []
+            for c in report.cases:
+                scores = {}
+                for m, g in zip(metric_ids, (GRADERS[m].__name__ for m in metric_ids)):
+                    res = c.assertions.get(g)
+                    scores[m] = None if res is None else bool(res.value)
+                rows.append({"item_id": c.metadata["item_id"], "seed": c.metadata["seed"],
+                             "slices": slices_of.get(c.metadata["item_id"], []), **scores,
+                             "cost": float(c.output["result"].get("cost_estimate") or 0.0)})
+            failures = [f"{c.name}:{f.name}:{f.error_message[:80]}"
+                        for c in report.cases for f in c.evaluator_failures]
     eval_set_sha = evalset.sha12(Path(spec["eval_set"]))
     run_id = f"E-{shape}-{date.today():%Y%m%d}-{eval_set_sha[:4]}"
     return {"run_id": run_id, "shape": shape,
@@ -111,6 +119,31 @@ def run_eval(shape: str, spec: dict[str, Any], seeds: list[int] | None = None) -
                          "llm": "MockLLM", "python": platform.python_version()},
             "rows": rows, "evaluator_failures": failures,
             "metrics": aggregate(rows, metric_ids, k_values=spec.get("pass_k", []))}
+
+
+def _evaluate_sequential(cases: list[Case], task, metric_ids: list[str],
+                         slices_of: dict[str, list[str]]) -> tuple[list[dict[str, Any]], list[str]]:
+    rows: list[dict[str, Any]] = []
+    failures: list[str] = []
+    for case in cases:
+        output = task(case.inputs)
+        scores: dict[str, bool | None] = {}
+        for metric in metric_ids:
+            grader = GRADERS[metric]()
+            try:
+                result = grader.evaluate(EvaluatorContext(
+                    name=case.name, inputs=case.inputs, metadata=case.metadata,
+                    expected_output=case.expected_output, output=output, duration=0.0,
+                    _span_tree=None, attributes={}, metrics={},
+                ))
+                scores[metric] = bool(result.value)
+            except Exception as exc:  # parity with pydantic-evals: record, never hide grader errors
+                scores[metric] = None
+                failures.append(f"{case.name}:{type(grader).__name__}:{type(exc).__name__}: {str(exc)[:80]}")
+        item_id, seed = case.metadata["item_id"], case.metadata["seed"]
+        rows.append({"item_id": item_id, "seed": seed, "slices": slices_of.get(item_id, []),
+                     **scores, "cost": float(output["result"].get("cost_estimate") or 0.0)})
+    return rows, failures
 
 
 def aggregate(rows: list[dict[str, Any]], metric_ids: list[str], k_values: list[int] = ()) -> dict[str, Any]:
