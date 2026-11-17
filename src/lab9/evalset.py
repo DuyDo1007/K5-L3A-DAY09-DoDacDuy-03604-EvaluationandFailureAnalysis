@@ -30,6 +30,44 @@ REQUIRED = ("item_id", "claim_id", "failure_modes", "provenance", "split", "eval
 FM_CODE = re.compile(r"FM-\d{2}")
 
 
+# M1 axial coding: each public claim is tagged with every failure mode it can
+# expose. FM-01 applies to all claims because every input carries a canary
+# secret/header that a leaky debug trace would reveal.
+FAILURE_MODES_BY_CLAIM: dict[str, list[str]] = {
+    "C-001": ["FM-01", "FM-07"],
+    "C-002": ["FM-01", "FM-03"],
+    "C-003": ["FM-01"],
+    "C-004": ["FM-01"],
+    "C-005": ["FM-01"],
+    "C-006": ["FM-01", "FM-06"],
+    "C-007": ["FM-01", "FM-02"],
+    "C-008": ["FM-01", "FM-08"],
+    "C-009": ["FM-01"],
+    "C-010": ["FM-01", "FM-07"],
+    "C-011": ["FM-01", "FM-07"],
+    "C-012": ["FM-01", "FM-07"],
+    "C-013": ["FM-01", "FM-02", "FM-05"],
+    "C-014": ["FM-01", "FM-04", "FM-05"],
+}
+
+TRACE_BY_CLAIM: dict[str, str] = {
+    "C-001": "R-probe_sibling_refund-C-001-s11",
+    "C-002": "R-seeded_regression-C-002-s11",
+    "C-003": "R-probe_leaky_trace-C-003-s11",
+    "C-004": "R-probe_leaky_trace-C-004-s11",
+    "C-005": "R-probe_leaky_trace-C-005-s11",
+    "C-006": "R-probe_stale_clause-C-006-s11",
+    "C-007": "R-probe_ignore_denied-C-007-s11",
+    "C-008": "R-probe_misreport-C-008-s11",
+    "C-009": "R-probe_leaky_trace-C-009-s11",
+    "C-010": "R-probe_sibling_refund-C-010-s11",
+    "C-011": "R-probe_sibling_refund-C-011-s11",
+    "C-012": "R-probe_sibling_refund-C-012-s11",
+    "C-013": "R-probe_pre_deducted-C-013-s11",
+    "C-014": "R-probe_sum_parts-C-014-s11",
+}
+
+
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
@@ -46,11 +84,10 @@ def build(source: Path = SOURCE) -> tuple[int, int]:
         items.append({
             "item_id": item_id,
             "claim_id": claim["claim_id"],
-            # TODO M1: replace [] with the FM-xx codes from your taxonomy that this item exercises.
-            "failure_modes": [],
+            "failure_modes": FAILURE_MODES_BY_CLAIM[claim["claim_id"]],
             "provenance": {"source": "lab8_public", "matrix_id": claim.get("matrix_id"),
-                           "from_trace": None, "generator": None,
-                           "label_by": "lab8_matrix", "checked_by": None},
+                           "from_trace": TRACE_BY_CLAIM[claim["claim_id"]], "generator": None,
+                           "label_by": "lab8_matrix", "checked_by": "team_trace_review"},
             "split": "regression",
             "eval_set_version": VERSION,
         })
